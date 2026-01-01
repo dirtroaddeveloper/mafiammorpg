@@ -2,11 +2,16 @@
 
 namespace App\Domain\Crimes;
 
+use App\Domain\City\CityHeatService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 
 class CrimeService
 {
+    public function __construct(private readonly CityHeatService $cityHeatService)
+    {
+    }
+
     public function attemptCrime(int $playerId, int $crimeId): array
     {
         $lockKey = "crimes:lock:{$playerId}:{$crimeId}";
@@ -29,26 +34,29 @@ class CrimeService
                 ];
             }
 
-            $crime = DB::table('crimes')->where('id', $crimeId)->first();
-            if (!$crime) {
-                return [
-                    'status' => 404,
-                    'message' => 'Crime not found.',
-                ];
-            }
+            return DB::transaction(function () use ($playerId, $crimeId, $cooldownKey) {
+                $crime = DB::table('crimes')->where('id', $crimeId)->lockForUpdate()->first();
+                if (!$crime) {
+                    return [
+                        'status' => 404,
+                        'message' => 'Crime not found.',
+                    ];
+                }
 
-            $player = DB::table('players')->where('id', $playerId)->lockForUpdate()->first();
-            if (!$player) {
-                return [
-                    'status' => 404,
-                    'message' => 'Player not found.',
-                ];
-            }
+                $player = DB::table('players')->where('id', $playerId)->lockForUpdate()->first();
+                if (!$player) {
+                    return [
+                        'status' => 404,
+                        'message' => 'Player not found.',
+                    ];
+                }
 
-            $result = DB::transaction(function () use ($playerId, $crime, $cooldownKey) {
-                $chance = (float) $crime->success_percentage;
+                $baseChance = (float) $crime->success_percentage;
+                $heatModifier = $this->cityHeatService->getHeatModifier($player->current_city);
+                $finalChance = max(1.0, min(100.0, $baseChance + $heatModifier));
+
                 $roll = random_int(1, 100);
-                $success = $roll <= $chance;
+                $success = $roll <= $finalChance;
 
                 if ($success) {
                     DB::table('players')
@@ -59,7 +67,7 @@ class CrimeService
                             'updated_at' => now(),
                         ]);
 
-                    $newChance = min(100, $chance + 0.5);
+                    $newChance = min(100.0, $baseChance + 0.5);
                 } else {
                     DB::table('players')
                         ->where('id', $playerId)
@@ -68,7 +76,7 @@ class CrimeService
                             'updated_at' => now(),
                         ]);
 
-                    $newChance = max(1, $chance - 1.0);
+                    $newChance = max(1.0, $baseChance - 1.0);
                 }
 
                 DB::table('crimes')
@@ -85,12 +93,12 @@ class CrimeService
                     'message' => $success ? 'Crime succeeded.' : 'Crime failed.',
                     'success' => $success,
                     'roll' => $roll,
-                    'chance' => $chance,
+                    'chance' => $finalChance,
+                    'base_chance' => $baseChance,
+                    'heat_modifier' => $heatModifier,
                     'cooldown_seconds' => (int) $crime->cooldown_seconds,
                 ];
             });
-
-            return $result;
         } finally {
             Redis::del($lockKey);
         }
