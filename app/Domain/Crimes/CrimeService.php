@@ -8,6 +8,12 @@ use Illuminate\Support\Facades\Redis;
 
 class CrimeService
 {
+    private const SUCCESS_HEAT_LEVEL_INCREASE = 1;
+    private const FAILURE_HEAT_LEVEL_INCREASE = 3;
+    private const SUCCESS_HEAT_MODIFIER_INCREASE = -0.5;
+    private const FAILURE_HEAT_MODIFIER_INCREASE = -1.5;
+    private const MAX_FINAL_CHANCE = 95.0;
+
     public function __construct(private readonly CityHeatService $cityHeatService)
     {
     }
@@ -51,9 +57,29 @@ class CrimeService
                     ];
                 }
 
-                $baseChance = (float) $crime->success_percentage;
+                $playerCrime = DB::table('player_crimes')
+                    ->where('player_id', $playerId)
+                    ->where('crime_id', $crimeId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$playerCrime) {
+                    DB::table('player_crimes')->insert([
+                        'player_id' => $playerId,
+                        'crime_id' => $crimeId,
+                        'success_percentage' => (float) $crime->success_percentage,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    $playerCrime = (object) [
+                        'success_percentage' => (float) $crime->success_percentage,
+                    ];
+                }
+
+                $baseChance = (float) $playerCrime->success_percentage;
                 $heatModifier = $this->cityHeatService->getHeatModifier($player->current_city);
-                $finalChance = max(1.0, min(100.0, $baseChance + $heatModifier));
+                $finalChance = max(1.0, min(self::MAX_FINAL_CHANCE, $baseChance + $heatModifier));
 
                 $roll = random_int(1, 100);
                 $success = $roll <= $finalChance;
@@ -68,6 +94,8 @@ class CrimeService
                         ]);
 
                     $newChance = min(100.0, $baseChance + 0.5);
+                    $heatLevelIncrease = self::SUCCESS_HEAT_LEVEL_INCREASE;
+                    $heatModifierIncrease = self::SUCCESS_HEAT_MODIFIER_INCREASE;
                 } else {
                     DB::table('players')
                         ->where('id', $playerId)
@@ -77,14 +105,40 @@ class CrimeService
                         ]);
 
                     $newChance = max(1.0, $baseChance - 1.0);
+                    $heatLevelIncrease = self::FAILURE_HEAT_LEVEL_INCREASE;
+                    $heatModifierIncrease = self::FAILURE_HEAT_MODIFIER_INCREASE;
                 }
 
-                DB::table('crimes')
-                    ->where('id', $crime->id)
+                DB::table('player_crimes')
+                    ->where('player_id', $playerId)
+                    ->where('crime_id', $crimeId)
                     ->update([
                         'success_percentage' => $newChance,
                         'updated_at' => now(),
                     ]);
+
+                $cityHeat = DB::table('city_heat')
+                    ->where('city', $player->current_city)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$cityHeat) {
+                    DB::table('city_heat')->insert([
+                        'city' => $player->current_city,
+                        'heat_level' => $heatLevelIncrease,
+                        'heat_modifier' => $heatModifierIncrease,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                } else {
+                    DB::table('city_heat')
+                        ->where('city', $player->current_city)
+                        ->update([
+                            'heat_level' => DB::raw('heat_level + ' . $heatLevelIncrease),
+                            'heat_modifier' => DB::raw('heat_modifier + ' . $heatModifierIncrease),
+                            'updated_at' => now(),
+                        ]);
+                }
 
                 Redis::setex($cooldownKey, (int) $crime->cooldown_seconds, '1');
 
