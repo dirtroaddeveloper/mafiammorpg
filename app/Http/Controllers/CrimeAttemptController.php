@@ -3,8 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Crimes\CrimeService;
+use App\Http\Requests\CrimeAttemptRequest;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 
 class CrimeAttemptController
 {
@@ -12,7 +12,7 @@ class CrimeAttemptController
     {
     }
 
-    public function attempt(Request $request, int $crime): JsonResponse
+    public function attempt(CrimeAttemptRequest $request, int $crime): JsonResponse
     {
         $player = $request->user();
         $result = $this->crimeService->attemptCrime($player->getKey(), $crime);
